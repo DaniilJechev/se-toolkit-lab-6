@@ -478,6 +478,9 @@ Always use tools to find information before answering. Do not make up file conte
     # Track all tool calls
     all_tool_calls = []
 
+    # Initialize answer
+    answer = "I was unable to process your question due to an error."
+
     # Agentic loop
     for iteration in range(MAX_TOOL_CALLS):
         print(f"\n[Iteration {iteration + 1}/{MAX_TOOL_CALLS}]", file=sys.stderr)
@@ -487,6 +490,9 @@ Always use tools to find information before answering. Do not make up file conte
 
         if response is None:
             print("Error: LLM call failed", file=sys.stderr)
+            # Try to provide a helpful answer based on what we have
+            if all_tool_calls:
+                answer = "I encountered an error while processing your question. Here's what I found: " + str(all_tool_calls)
             break
 
         choice = response["choices"][0]
