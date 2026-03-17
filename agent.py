@@ -37,7 +37,20 @@ def load_env(env_path: Path) -> dict[str, str]:
 
 
 def load_config() -> dict[str, str]:
-    """Load LLM configuration from .env.agent.secret."""
+    """Load LLM configuration from environment or .env.agent.secret."""
+    # First check environment variables (autochecker injects values here)
+    env_api_key = os.environ.get("LLM_API_KEY")
+    env_api_base = os.environ.get("LLM_API_BASE")
+    env_model = os.environ.get("LLM_MODEL")
+    
+    if all([env_api_key, env_api_base, env_model]):
+        return {
+            "LLM_API_KEY": env_api_key,
+            "LLM_API_BASE": env_api_base,
+            "LLM_MODEL": env_model
+        }
+    
+    # Fall back to .env.agent.secret for local development
     project_root = Path(__file__).parent
     env_path = project_root / ".env.agent.secret"
 
@@ -48,14 +61,21 @@ def load_config() -> dict[str, str]:
 
     if missing:
         print(f"Error: Missing required config keys: {missing}", file=sys.stderr)
-        print("Please create .env.agent.secret with required values.", file=sys.stderr)
+        print("Please create .env.agent.secret with required values or set environment variables.", file=sys.stderr)
         sys.exit(1)
 
     return config
 
 
 def load_lms_config() -> dict[str, str]:
-    """Load LMS backend configuration from .env.docker.secret."""
+    """Load LMS backend configuration from environment or .env.docker.secret."""
+    # First check environment variable (autochecker injects values here)
+    env_api_key = os.environ.get("LMS_API_KEY")
+    
+    if env_api_key:
+        return {"LMS_API_KEY": env_api_key}
+    
+    # Fall back to .env.docker.secret for local development
     project_root = Path(__file__).parent
     env_path = project_root / ".env.docker.secret"
 
@@ -63,8 +83,8 @@ def load_lms_config() -> dict[str, str]:
 
     # LMS_API_KEY is required
     if "LMS_API_KEY" not in config:
-        print(f"Error: Missing LMS_API_KEY in .env.docker.secret", file=sys.stderr)
-        print("Please create .env.docker.secret with LMS_API_KEY.", file=sys.stderr)
+        print(f"Error: Missing LMS_API_KEY in environment or .env.docker.secret", file=sys.stderr)
+        print("Please set LMS_API_KEY environment variable or create .env.docker.secret with LMS_API_KEY.", file=sys.stderr)
         sys.exit(1)
 
     return config
@@ -72,12 +92,12 @@ def load_lms_config() -> dict[str, str]:
 
 def get_api_base_url() -> str:
     """Get the backend API base URL from environment or use default."""
-    # Check environment variable first
+    # Check environment variable first (autochecker injects values here)
     env_url = os.environ.get("AGENT_API_BASE_URL")
     if env_url:
         return env_url
-
-    # Check .env.docker.secret
+    
+    # Check .env.docker.secret for local development
     project_root = Path(__file__).parent
     env_path = project_root / ".env.docker.secret"
     config = load_env(env_path)
@@ -445,26 +465,72 @@ def run_agentic_loop(question: str, config: dict[str, str]) -> dict:
     system_prompt = """You are a documentation and system assistant for a software engineering toolkit.
 You have access to tools that let you read files, list directories, and query the backend API.
 
-When answering questions:
-1. For wiki/documentation questions: Use list_files to discover files, then read_file to find information
-2. For source code questions: Use read_file to read the relevant source files
-3. For data/system questions: Use query_api to query the backend API
-4. Include a source reference in your answer when applicable (file path or API endpoint)
-5. Be concise and accurate
+## Tool Selection Rules
 
-Available tools:
+### Use list_files when:
+- Question asks "what files are in...", "list all...", "find files about..."
+- You need to discover wiki/documentation files
+- Examples: "What files are in the wiki directory?", "List all API routers"
+
+### Use read_file when:
+- Question asks about static facts: framework, architecture, configuration
+- Question asks to read source code, documentation, or configuration files
+- Question contains: "what framework", "what does", "explain", "read the", "according to"
+- Examples: 
+  - "What Python web framework does this project use?" → read_file backend/app/main.py or wiki/python.md
+  - "According to the wiki..." → list_files wiki/, then read_file the relevant .md file
+  - "Read the Dockerfile" → read_file Dockerfile or backend/Dockerfile
+  - "What status code..." → This requires query_api to test, NOT read_file
+
+### Use query_api when:
+- Question asks about runtime data: counts, current state, dynamic information
+- Question asks "how many", "what is the current", "query the API"
+- Question asks about HTTP status codes (you must TEST the API, not read docs)
+- Examples:
+  - "How many items are in the database?" → query_api GET /items/
+  - "What status code does /items/ return?" → query_api GET /items/ and check status_code
+  - "Query /analytics/completion-rate" → query_api GET /analytics/completion-rate?lab=lab-99
+
+## Important Guidelines
+
+1. **HTTP Status Codes**: To determine what status code an endpoint returns, you MUST use query_api to make the actual request. Documentation may be outdated.
+
+2. **Authentication**: When using query_api, the tool automatically includes the API key. If you get 401/403, the endpoint requires authentication which is already handled.
+
+3. **Wiki Questions**: For "according to the wiki" questions:
+   - First use list_files wiki/ to find relevant files
+   - Then read_file the specific .md file
+   - Look for the exact section mentioned in the question
+
+4. **Source Code Questions**: For "what framework", "read the source", "list all routers":
+   - Read the actual source files (backend/app/*.py, backend/app/routers/*.py)
+   - Check imports and dependencies
+
+5. **Data Questions**: For "how many", "count", "current state":
+   - Use query_api to get live data
+   - Parse the JSON response and count/extract the answer
+
+6. **Bug Diagnosis**: For "what's wrong", "diagnose", "bug":
+   - First query_api to see the error response
+   - Then read_file the relevant source code
+   - Compare expected vs actual behavior
+
+## Response Format
+
+- Be concise but complete
+- Include source reference: file path for read_file, endpoint for query_api
+- For status code questions, report the actual status_code from query_api response
+- For count questions, provide the exact number from the API response
+
+## Available Tools
+
 - read_file: Read contents of a file (requires 'path' argument)
-- list_files: List files in a directory (requires 'path' argument)
+- list_files: List files in a directory (requires 'path' argument)  
 - query_api: Query the backend API (requires 'method' and 'path' arguments, optional 'body')
+  - Returns JSON with "status_code" and "body" fields
+  - Always includes authentication header
 
-Tool selection guide:
-- "What files are in..." → list_files
-- "Show me the contents of..." → read_file
-- "How many items..." → query_api with GET /items/
-- "What framework..." → read_file (pyproject.toml or source code)
-- "Analytics..." → query_api with appropriate endpoint
-
-Always use tools to find information before answering. Do not make up file contents or data."""
+Always use tools to find information. Never guess or make up answers."""
 
     # Initialize messages
     messages = [

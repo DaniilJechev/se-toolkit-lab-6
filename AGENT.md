@@ -164,19 +164,42 @@ The system prompt instructs the LLM to:
 1. **For wiki/documentation questions:** Use `list_files` → `read_file`
 2. **For source code questions:** Use `read_file` on relevant source files
 3. **For data/system questions:** Use `query_api` to query the backend
-4. Include source references when applicable
-5. Be concise and accurate
+4. **For HTTP status code questions:** Use `query_api` to TEST the actual endpoint (docs may be outdated)
+5. Include source references when applicable
+6. Be concise and accurate
 
 ### Tool Selection Guide
 
-| Question Type | Tool to Use |
-|--------------|-------------|
-| "What files are in..." | `list_files` |
-| "Show me the contents of..." | `read_file` |
-| "How many items..." | `query_api` with `GET /items/` |
-| "What framework..." | `read_file` (pyproject.toml or source code) |
-| "Analytics..." | `query_api` with appropriate endpoint |
-| "Bug diagnosis..." | `query_api` + `read_file` |
+| Question Type | Tool to Use | Example |
+|--------------|-------------|---------|
+| "What files are in..." | `list_files` | "What files are in the wiki directory?" |
+| "Show me the contents of..." | `read_file` | "Show me the contents of main.py" |
+| "How many items..." | `query_api` | "How many items are in the database?" |
+| "What framework..." | `read_file` | "What Python web framework does the backend use?" |
+| "List all routers..." | `list_files` + `read_file` | "List all API router modules" |
+| "What status code..." | `query_api` | "What status code does /items/ return?" |
+| "According to the wiki..." | `list_files` + `read_file` | "According to the wiki, how to protect a branch?" |
+| "Read the Dockerfile..." | `read_file` | "Read the Dockerfile. What technique is used?" |
+| "Bug diagnosis..." | `query_api` + `read_file` | "Query /analytics/completion-rate and find the bug" |
+| "Compare X and Y..." | Multiple `read_file` calls | "Compare ETL error handling vs API error handling" |
+
+### Decision Criteria
+
+The system prompt includes explicit decision criteria:
+
+**Use `list_files` when:**
+- Question asks "what files are in...", "list all...", "find files about..."
+- You need to discover wiki/documentation files
+
+**Use `read_file` when:**
+- Question asks about static facts: framework, architecture, configuration
+- Question asks to read source code, documentation, or configuration files
+- Question contains: "what framework", "what does", "explain", "read the", "according to"
+
+**Use `query_api` when:**
+- Question asks about runtime data: counts, current state, dynamic information
+- Question asks "how many", "what is the current", "query the API"
+- Question asks about HTTP status codes (you must TEST the API, not read docs)
 
 ## Output Format
 
@@ -271,32 +294,93 @@ python tests/test_agent_task3.py
 
 ## Lessons Learned
 
-### Challenge 1: Tool Selection
+### Challenge 1: Tool Selection Ambiguity
 
-Initially, the LLM would call `read_file` for data questions like "How many items...". This was fixed by:
-- Adding explicit tool selection guide in the system prompt
-- Providing examples of when to use each tool
-- Making `query_api` description more specific about data queries
+**Problem:** Initially, the LLM would call `read_file` for data questions like "How many items..." or guess the framework instead of reading the code.
+
+**Solution:** 
+- Rewrote the system prompt with explicit tool selection rules organized by question type
+- Added a "Decision Criteria" section with clear when-to-use-what guidelines
+- Provided concrete examples for each tool
+- Emphasized that HTTP status codes require `query_api` to TEST the actual endpoint (documentation may be outdated)
+
+**Key Insight:** The LLM needs very explicit instructions about tool selection. Vague descriptions like "use for data questions" are not enough — specific examples and decision trees work much better.
 
 ### Challenge 2: API Authentication
 
-The `query_api` tool needed to authenticate with the backend. Solution:
-- Read `LMS_API_KEY` from `.env.docker.secret`
-- Pass `Authorization: Bearer <token>` header in all requests
-- Handle 401 errors gracefully
+**Problem:** The `query_api` tool needed to authenticate with the backend using `LMS_API_KEY`, but the autochecker injects different credentials at runtime.
 
-### Challenge 3: Environment Variables
+**Solution:**
+- Modified `load_lms_config()` to check environment variables first, then fall back to `.env.docker.secret`
+- Modified `get_api_base_url()` to check `AGENT_API_BASE_URL` environment variable first
+- Modified `load_config()` to check LLM environment variables first
+- This ensures compatibility with both local development and autochecker evaluation
 
-The autochecker runs with different credentials. Solution:
-- Read all config from environment variables
-- Support `AGENT_API_BASE_URL` env var (overrides file config)
-- Default to `http://localhost:42002` if not specified
+**Key Insight:** Always read configuration from environment variables first for testability and CI/CD compatibility.
 
-### Challenge 4: Error Handling
+### Challenge 3: HTTP Status Code Questions
 
-The LLM sometimes returns `content: null` for tool calls. Solution:
-- Use `(msg.get("content") or "")` instead of `msg.get("content", "")`
-- Handle missing or malformed tool call responses
+**Problem:** The agent was reading documentation to answer "What status code does /items/ return?" instead of actually testing the endpoint.
+
+**Solution:**
+- Added explicit instruction in system prompt: "For HTTP status code questions, you MUST use query_api to make the actual request. Documentation may be outdated."
+- Added examples showing that status code questions require `query_api`
+
+**Key Insight:** Distinguish between static knowledge (framework, architecture) and runtime knowledge (status codes, data counts). The latter requires live API calls.
+
+### Challenge 4: Wiki Navigation
+
+**Problem:** For "According to the wiki..." questions, the agent needed to first discover which wiki file contains the answer.
+
+**Solution:**
+- Added explicit workflow: "For 'according to the wiki' questions: First use list_files wiki/ to find relevant files, then read_file the specific .md file, look for the exact section mentioned."
+- The agent now systematically searches for relevant wiki files before reading
+
+**Key Insight:** Multi-step tasks need explicit step-by-step instructions in the system prompt.
+
+### Challenge 5: Environment Variable Handling
+
+**Problem:** The autochecker runs with different LLM credentials and backend URL. Hardcoded values would fail.
+
+**Solution:**
+- All configuration functions (`load_config`, `load_lms_config`, `get_api_base_url`) now check environment variables first
+- Fall back to `.env` files only for local development
+- Added comments explaining the autochecker injection mechanism
+
+**Key Insight:** Design for testability from the start. Environment variable injection is a standard pattern for CI/CD.
+
+### Challenge 6: Error Handling in Agentic Loop
+
+**Problem:** The LLM sometimes returns `content: null` when making tool calls, causing `AttributeError` with `.get()`.
+
+**Solution:**
+- Use `(msg.get("content") or "")` instead of `msg.get("content", "")` — the field is present but null, not missing
+- Handle malformed tool call responses gracefully
+- Provide fallback answers when LLM calls fail
+
+**Key Insight:** Always assume LLM responses can be malformed. Defensive programming is essential.
+
+### Challenge 7: Bug Diagnosis Questions
+
+**Problem:** For "diagnose the bug in /analytics/completion-rate" questions, the agent needs to chain multiple tools.
+
+**Solution:**
+- Added explicit workflow in system prompt: "First query_api to see the error response, then read_file the relevant source code, compare expected vs actual behavior"
+- The agent now learns to correlate API error messages with source code patterns
+
+**Key Insight:** Complex reasoning tasks require explicit multi-step workflows in the system prompt.
+
+## Final Eval Score
+
+**Local tests:** 5/5 passed (100%)
+**Hidden tests:** Pending autochecker evaluation
+
+**Test Coverage:**
+- `test_agent_uses_query_api_for_data` — Verifies `query_api` for count questions
+- `test_agent_uses_read_file_for_framework` — Verifies `read_file` for framework questions
+- `test_agent_query_api_authentication` — Verifies API authentication works
+- `test_agent_uses_list_files_for_api_routers` — Verifies file discovery for router listing
+- `test_agent_reads_dockerfile_for_multi_stage` — Verifies Dockerfile reading for architecture questions
 
 ## Future Extensions
 
@@ -304,8 +388,3 @@ The LLM sometimes returns `content: null` for tool calls. Solution:
 - **Streaming:** Stream LLM responses for better UX
 - **Caching:** Cache API responses for repeated questions
 - **More tools:** Add `search_code`, `run_tests`, `deploy` tools
-
-## Final Eval Score
-
-**Local tests:** 5/5 passed (100%)
-**Hidden tests:** Pending autochecker evaluation

@@ -1,125 +1,106 @@
-# Task 3 Plan: The System Agent
+# Task 3: The System Agent - Implementation Plan
 
 ## Overview
+This task adds a `query_api` tool to the agent from Task 2, enabling it to query the deployed backend API for system facts and data-dependent queries.
 
-Add a `query_api` tool to the documentation agent so it can query the deployed backend API. This enables the agent to answer static system facts (framework, ports, status codes) and data-dependent queries (item count, scores).
+## Implementation Plan
 
-## LLM Provider
+### 1. query_api Tool Schema
+The tool is already defined in `agent.py` with:
+- **Parameters**: `method` (GET/POST/PUT/DELETE), `path` (endpoint), `body` (optional JSON)
+- **Returns**: JSON string with `status_code` and `body`
+- **Authentication**: Uses `LMS_API_KEY` from `.env.docker.secret`
 
-**Provider:** OpenRouter  
-**Model:** `nvidia/nemotron-3-super-120b-a12b:free`  
-**API Base:** `https://openrouter.ai/api/v1`
+### 2. Authentication Handling
+- Read `LMS_API_KEY` from environment variable or `.env.docker.secret`
+- Include `Authorization: Bearer {LMS_API_KEY}` header in all API requests
+- `AGENT_API_BASE_URL` from environment (default: `http://localhost:42002`)
 
-## New Tool: query_api
+### 3. System Prompt Updates
+The system prompt needs to be more explicit about:
+- **When to use query_api**: For runtime data (item counts, analytics, status codes)
+- **When to use read_file**: For static facts (framework, code structure, configuration)
+- **When to use list_files**: For discovering wiki/documentation files
 
-**Purpose:** Send HTTP requests to the deployed backend API.
+### 4. Key Issues to Fix
 
-**Parameters:**
-- `method` (string, required) — HTTP method (GET, POST, PUT, DELETE)
-- `path` (string, required) — API endpoint path (e.g., `/items/`, `/analytics/completion-rate`)
-- `body` (string, optional) — JSON request body for POST/PUT requests
+#### Issue 1: Agent doesn't authenticate API requests properly
+**Problem**: The agent may not be sending the API key correctly.
+**Fix**: Ensure `load_lms_config()` reads from environment first, then file.
 
-**Returns:** JSON string with `status_code` and `body`.
+#### Issue 2: Agent doesn't handle API errors correctly
+**Problem**: When API returns 401/403, agent thinks 200 is normal.
+**Fix**: Improve error handling and teach agent to interpret status codes.
 
-**Authentication:** Uses `LMS_API_KEY` from `.env.docker.secret` via `Authorization: Bearer <token>` header.
+#### Issue 3: System prompt too vague
+**Problem**: Agent doesn't know when to use which tool.
+**Fix**: Add explicit examples and decision criteria.
 
-## Environment Variables
+#### Issue 4: Tool call argument parsing
+**Problem**: Arguments may not be parsed correctly from LLM response.
+**Fix**: Ensure robust JSON parsing with fallbacks.
 
-The agent must read these from environment (not hardcoded):
+### 5. Environment Variable Handling
+All configuration must come from environment variables:
+- `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL` → LLM config
+- `LMS_API_KEY` → Backend API authentication
+- `AGENT_API_BASE_URL` → Backend URL (optional, defaults to localhost)
 
-| Variable | Purpose | Source |
-|----------|---------|--------|
-| `LLM_API_KEY` | LLM provider API key | `.env.agent.secret` |
-| `LLM_API_BASE` | LLM API endpoint URL | `.env.agent.secret` |
-| `LLM_MODEL` | Model name | `.env.agent.secret` |
-| `LMS_API_KEY` | Backend API key for query_api auth | `.env.docker.secret` |
-| `AGENT_API_BASE_URL` | Base URL for query_api | Optional, defaults to `http://localhost:42002` |
+The autochecker injects its own values, so no hardcoded values.
 
-## Implementation Steps
+## Benchmark Results (Initial Run)
 
-1. **Add `query_api` function** to `agent.py`:
-   - Accept method, path, body parameters
-   - Read `LMS_API_KEY` from `.env.docker.secret`
-   - Read `AGENT_API_BASE_URL` from environment (default: `http://localhost:42002`)
-   - Send HTTP request with `Authorization: Bearer <LMS_API_KEY>`
-   - Return JSON response with status_code and body
+```
+Score: 0/5 passed (0%)
 
-2. **Add tool schema** for function calling:
-   ```json
-   {
-     "type": "function",
-     "function": {
-       "name": "query_api",
-       "description": "Query the deployed backend API",
-       "parameters": {
-         "type": "object",
-         "properties": {
-           "method": {"type": "string", "description": "HTTP method (GET, POST, etc.)"},
-           "path": {"type": "string", "description": "API endpoint path (e.g., /items/)"},
-           "body": {"type": "string", "description": "JSON request body (optional)"}
-         },
-         "required": ["method", "path"]
-       }
-     }
-   }
-   ```
+Failed questions:
+1. [Wiki] Branch protection steps - agent didn't find wiki files
+2. [Framework] Python web framework - agent guessed instead of reading code
+3. [Data] Item count - query_api didn't work or returned wrong data
+4. [Bug] Analytics completion-rate - agent didn't diagnose the bug
+5. [Architecture] Request lifecycle - agent didn't trace through files
+```
 
-3. **Update system prompt** to guide LLM:
-   - Use `list_files` to discover wiki files
-   - Use `read_file` to read documentation or source code
-   - Use `query_api` to query the backend for data or system info
-   - Choose the right tool based on question type
+## Iteration Strategy
 
-4. **Update output format**:
-   - `source` is now optional (system questions may not have wiki source)
+1. **Fix query_api authentication** - Ensure LMS_API_KEY is used correctly ✓
+2. **Improve system prompt** - Add explicit tool selection rules ✓
+3. **Add error handling** - Teach agent to interpret HTTP status codes ✓
+4. **Test each question class** - Run eval, fix one class at a time
+5. **Add regression tests** - Ensure fixes don't break existing functionality ✓
 
-5. **Run the benchmark**:
-   ```bash
-   uv run run_eval.py
-   ```
+## Implementation Changes Made
 
-6. **Iterate** based on failures:
-   - Fix tool descriptions
-   - Fix bugs in tool implementation
-   - Adjust system prompt
+### 1. Environment Variable Handling
+- `load_config()` now checks `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL` from environment first
+- `load_lms_config()` now checks `LMS_API_KEY` from environment first
+- `get_api_base_url()` now checks `AGENT_API_BASE_URL` from environment first
+- All functions fall back to `.env` files for local development
 
-## Tool Selection Strategy
+### 2. System Prompt Rewrite
+- Added explicit "Tool Selection Rules" section with when-to-use-what
+- Added "Important Guidelines" for HTTP status codes, authentication, wiki questions
+- Added concrete examples for each question type
+- Added decision criteria: list_files vs read_file vs query_api
 
-| Question Type | Tool to Use |
-|--------------|-------------|
-| Wiki documentation | `list_files` → `read_file` |
-| System facts (framework, ports) | `read_file` (source code) or `query_api` |
-| Data queries (item count, scores) | `query_api` |
-| Bug diagnosis | `read_file` (source code) + `query_api` (error info) |
+### 3. Test Coverage
+- Added `test_agent_uses_list_files_for_api_routers` - Verifies file discovery
+- Added `test_agent_reads_dockerfile_for_multi_stage` - Verifies Dockerfile reading
+- Total: 5 regression tests for Task 3
 
-## Testing Strategy
+## Lessons Learned
 
-**Test 1:** "What framework does the backend use?"
-- Expected: `read_file` in tool_calls (reading pyproject.toml or backend code)
+### Tool Selection Requires Explicit Instructions
+The LLM needs very specific guidance about which tool to use. Vague descriptions like "use for data questions" are insufficient. We added:
+- Decision trees organized by question type
+- Concrete examples for each tool
+- Explicit workflows for multi-step tasks (e.g., wiki navigation)
 
-**Test 2:** "How many items are in the database?"
-- Expected: `query_api` in tool_calls with `GET /items/`
+### Environment Variable Injection is Critical
+The autochecker runs with different credentials. Reading from environment variables first ensures compatibility with both local development and automated evaluation.
 
-## Benchmark Questions
+### HTTP Status Code Questions Require Live Testing
+The agent was reading documentation instead of testing endpoints. We added explicit instruction: "For HTTP status code questions, you MUST use query_api to make the actual request. Documentation may be outdated."
 
-The `run_eval.py` script tests 10 questions:
-1. Wiki lookup (branch protection steps)
-2. System fact (web framework)
-3. Data query (item count)
-4. Analytics endpoint (completion rate for lab-99)
-5. Bug diagnosis
-6. Reasoning questions
-7-10. Additional challenges
-
-## Files to Modify
-
-- `agent.py` — add `query_api` tool and update system prompt
-- `AGENT.md` — update documentation
-- `tests/test_agent_task3.py` — new tests
-
-## Success Criteria
-
-- All 10 `run_eval.py` questions pass
-- Agent correctly chooses between wiki tools and `query_api`
-- Authentication works with `LMS_API_KEY`
-- No hardcoded values (all config from environment)
+### Multi-Step Tasks Need Step-by-Step Instructions
+For "according to the wiki" questions, the agent needs explicit workflow: list_files → read_file → find section. Single-sentence instructions are not enough.
